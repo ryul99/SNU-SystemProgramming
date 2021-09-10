@@ -15,7 +15,7 @@ CFLAGS=-std=c99 -Wall -O2
 
 # project related information: SOURCES lists all source files of the project, TARGET the desired
 # name of the generated binary. OBJECTS and DEPS are generated automatically by pattern substitution
-SOURCES=main.c
+SOURCES=main.c mathlib.c
 TARGET=hw2
 OBJECTS=$(SOURCES:.c=.o)
 DEPS=$(SOURCES:.c=.d)
