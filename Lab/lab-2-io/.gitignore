@@ -1,0 +1,5 @@
+dirtree
+*.o
+*.d
+test?/*
+demo/*
