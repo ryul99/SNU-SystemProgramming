@@ -3,8 +3,8 @@
 //
 /// @file
 /// @brief resursively traverse directory tree and list all entries
-/// @author <yourname>
-/// @studid <studentid>
+/// @author Changmin Choi
+/// @studid 2017-19841
 //--------------------------------------------------------------------------------------------------
 
 #define _GNU_SOURCE
@@ -81,8 +81,8 @@ struct dirent *getNext(DIR *dir)
 /// @retval 1  if a>b
 static int dirent_compare(const void *a, const void *b)
 {
-  struct dirent *e1 = (struct dirent*)a;
-  struct dirent *e2 = (struct dirent*)b;
+  struct dirent *e1 = *((struct dirent**)a);
+  struct dirent *e2 = *((struct dirent**)b);
 
   // if one of the entries is a directory, it comes first
   if (e1->d_type != e2->d_type) {
@@ -104,6 +104,184 @@ static int dirent_compare(const void *a, const void *b)
 void processDir(const char *dn, const char *pstr, struct summary *stats, unsigned int flags)
 {
   // TODO
+  // Errors
+  char *error_oom, *pstr_err;
+  if (flags & F_TREE)
+    pstr_err = "`-";
+  else
+    pstr_err = "  ";
+  asprintf(&error_oom, "%s%sERROR: Cannot allocate memory\n", pstr, pstr_err);
+  errno = 0;
+  // open dir
+  DIR *d = opendir(dn);
+  if (errno == EACCES) {
+    printf("%s%sERROR: Permission denied\n", pstr, pstr_err);
+    errno = 0;
+    return;
+  }
+  else if (errno == ENOENT) {
+    printf("%s%sERROR: No such file or directory\n", pstr, pstr_err);
+    errno = 0;
+    return;
+  }
+  else if (errno == ENOMEM) {
+    printf("%s", error_oom);
+    errno = 0;
+    return;
+  }
+  else if (errno == ENOTDIR) {
+    printf("%s%sERROR: Not a directory\n", pstr, pstr_err);
+    errno = 0;
+    return;
+  }
+  else if (errno != 0) {
+    errno = 0;
+    return;
+  }
+  // read dirents
+  int num_child = 0;
+  struct dirent **children = (struct dirent **)malloc(MAX_DIR * sizeof(struct dirent*));
+  if (children == NULL) {
+    printf("%s", error_oom);
+    closedir(d);
+    errno = 0;
+    return;
+  }
+  // loop reading dirent
+  struct dirent *child;
+  while ((child = getNext(d))) {
+    children[num_child] = (struct dirent*) malloc(child->d_reclen);
+    if (children[num_child] == NULL) {
+      printf("%s", error_oom);
+      for (int i = 0; i < num_child; i++) {
+        free(children[i]);
+      }
+      free(children);
+      closedir(d);
+      errno = 0;
+      return;
+    }
+    memcpy(children[num_child], child, child->d_reclen);
+    num_child++;
+    if (num_child >= MAX_DIR) {
+      children = (struct dirent **)realloc(children, (num_child + MAX_DIR) * sizeof(struct dirent*));
+      if (children == NULL) {
+        printf("%s", error_oom);
+        for (int i = 0; i < num_child; i++) {
+          free(children[i]);
+        }
+        free(children);
+        closedir(d);
+        errno = 0;
+        return;
+      }
+    }
+  }
+  // sort dirents
+  qsort(children, num_child, sizeof(struct dirent*), dirent_compare);
+  // process dirent
+  for (int i = 0; i < num_child; i++) {
+    unsigned char child_dtype = ' ';
+    char *child_dname = children[i]->d_name;
+
+    char *new_pstr;
+    char *name;
+    struct stat child_stat;
+    char *child_dir;
+    asprintf(&child_dir, "%s/%s", dn, child_dname);
+
+    // fancy tree view mode
+    if (flags & F_TREE) {
+      if (i < num_child - 1) {
+        // not the last child
+        asprintf(&name, "%s|-%s", pstr, child_dname);
+        // set new_pstr
+        asprintf(&new_pstr, "%s| ", pstr);
+      }
+      else {
+        // the last child
+        asprintf(&name, "%s`-%s", pstr, child_dname);
+        // set new_pstr
+        asprintf(&new_pstr, "%s  ", pstr);\
+      }
+    }
+    // simple mode
+    else {
+      asprintf(&name, "%s  %s", pstr, child_dname);
+      //set new_pstr
+      asprintf(&new_pstr, "%s  ", pstr);
+    }
+    if (flags & F_VERBOSE && strlen(name) > 54) {
+      char tmp[60];
+      strncpy(tmp, name, 51 * sizeof(char));
+      tmp[51] = '\0';
+      asprintf(&name, "%s...", tmp);
+    }
+    // update summary
+    if (children[i]->d_type == DT_REG) {
+      (stats->files)++;
+      child_dtype = ' ';
+    }
+    else if (children[i]->d_type == DT_DIR) {
+      (stats->dirs)++;
+      child_dtype = 'd';
+    }
+    else if (children[i]->d_type == DT_FIFO) {
+      (stats->fifos)++;
+      child_dtype = 'f';
+    }
+    else if (children[i]->d_type == DT_SOCK) {
+      (stats->socks)++;
+      child_dtype = 's';
+    }
+    else if (children[i]->d_type == DT_LNK) {
+      (stats->links)++;
+      child_dtype = 'l';
+    }
+    else if (children[i]->d_type == DT_CHR) {
+      child_dtype = 'c';
+    }
+    else if (children[i]->d_type == DT_BLK) {
+      child_dtype = 'b';
+    }
+    lstat(child_dir, &child_stat);
+    if (errno != 0) {
+      printf("%-54s  %s\n", name, "No such file or directory");
+      errno = 0;
+    }
+    else {
+      stats->size += child_stat.st_size;
+      stats->blocks += child_stat.st_blocks;
+
+      // print child
+      if (flags & F_VERBOSE) {
+        char *username = strdup((getpwuid(child_stat.st_uid)->pw_name));
+        char *groupname = strdup((getgrgid(child_stat.st_gid)->gr_name));
+        printf("%-54s  %8s:%-8s  %10ld  %8ld  %1c\n",
+            name,
+            username,
+            groupname,
+            child_stat.st_size,
+            child_stat.st_blocks,
+            child_dtype
+        );
+      }
+      else {
+        printf("%s\n", name);
+      }
+    }
+    // recursive
+    if (children[i]->d_type == DT_DIR) {
+      processDir(child_dir, new_pstr, stats, flags);
+    }
+  }
+  // finish
+  for (int i = 0; i < num_child; i++) {
+    free(children[i]);
+  }
+  free(children);
+  closedir(d);
+  return;
 }
 
 
@@ -184,7 +362,55 @@ int main(int argc, char *argv[])
   // process each directory
   //
   // TODO
+  tstat = (struct summary) {.blocks=0, .dirs=0, .fifos=0, .files=0, .links=0, .size=0, .socks=0};
+  for (int i = 0; i < ndir; i++) {
+    dstat = (struct summary) {.blocks=0, .dirs=0, .fifos=0, .files=0, .links=0, .size=0, .socks=0};
+    if (flags & F_SUMMARY) {
+      if (flags & F_VERBOSE) {
+        printf("%-60s%-10s %14s%15s \n", "Name", "User:Group", "Size", "Blocks Type");
+      }
+      else {
+        printf("Name\n");
+      }
+      printf("----------------------------------------------------------------------------------------------------\n");
+    }
+    printf("%s\n", directories[i]);
+    processDir(directories[i], "", &dstat, flags);
+    if (flags & F_SUMMARY)
+      printf("----------------------------------------------------------------------------------------------------\n");
 
+    // print summary
+    if (flags & F_SUMMARY) {
+      char *str_file, *str_dir, *str_link, *str_pipe, *str_sock, *str_summary;
+      //
+      str_file = dstat.files == 1 ? "file" : "files";
+      str_dir = dstat.dirs == 1 ? "directory" : "directories";
+      str_link = dstat.links == 1 ? "link" : "links";
+      str_pipe = dstat.fifos == 1 ? "pipe" : "pipes";
+      str_sock = dstat.socks == 1 ? "socket" : "sockets";
+      asprintf(&str_summary, "%d %s, %d %s, %d %s, %d %s, and %d %s",
+          dstat.files, str_file,
+          dstat.dirs, str_dir,
+          dstat.links, str_link,
+          dstat.fifos, str_pipe,
+          dstat.socks, str_sock
+      );
+      if (flags & F_VERBOSE)
+        printf("%-68s   %14lld %9lld\n", str_summary, dstat.size, dstat.blocks);
+      else
+        printf("%s\n", str_summary);
+      printf("\n");
+    }
+
+    // aggregate summary
+    tstat.blocks += dstat.blocks;
+    tstat.dirs += dstat.dirs;
+    tstat.fifos += dstat.fifos;
+    tstat.files += dstat.files;
+    tstat.links += dstat.links;
+    tstat.size += dstat.size;
+    tstat.socks += dstat.socks;
+  }
   //
   // print grand total
   //
