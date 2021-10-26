@@ -1,0 +1,13 @@
+CC=gcc
+CFLAGS=-std=c99 -g
+
+.PHONY: clean
+
+all: fibonacci
+
+fibonacci: main.c fib.c fib.h
+	$(CC) $(CFLAGS) -o $@ main.c fib.c
+
+clean:
+	rm -f fibonacci
+

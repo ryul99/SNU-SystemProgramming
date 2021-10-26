@@ -1,0 +1,18 @@
+CC=gcc
+CFLAGS=-std=c99 -g
+
+SOURCES=main.c fib.c
+HEADERS=fib.h
+
+TARGET=fibonacci
+
+.PHONY: clean
+
+all: $(TARGET)
+
+$(TARGET): $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ $(SOURCES)
+
+clean:
+	rm -f $(TARGET)
+
