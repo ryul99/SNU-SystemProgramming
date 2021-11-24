@@ -30,7 +30,7 @@ DEPS=$(SOURCES:.c=.d)
 #--- rules
 .PHONY: doc
 
-all: $(TARGETS) csapshref
+all: $(TARGETS)
 
 csapshref: csapsh
 	cp csapsh csapshref
@@ -51,4 +51,4 @@ clean:
 	rm -f $(OBJECTS) $(DEPS)
 
 mrproper: clean
-	rm -rf $(TARGETS) csapshref doc/html
+	rm -rf $(TARGETS) csapsh doc/html

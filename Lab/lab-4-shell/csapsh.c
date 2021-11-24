@@ -151,7 +151,7 @@ int main(int argc, char **argv)
   char c;
   char cmdline[MAXLINE];
 
-  // redirect stderr to stdout so that the driver will get all output 
+  // redirect stderr to stdout so that the driver will get all output
   // on the pipe connected to stdout.
   dup2(STDOUT_FILENO, STDERR_FILENO);
 
@@ -239,7 +239,7 @@ void free_cmdstruct(char ***cmd)
 
 /// @brief Evaluate the command line. The function @a parseline() does the heavy lifting of parsing
 ///        the command line and splitting it into separate char *argv[] arrays that represent
-///        individual commands with their arguments. 
+///        individual commands with their arguments.
 ///        A job consists of one process or several processes connected via pipes. Optionally,
 ///        the output of the entire job can be saved into a file specified by outfile.
 ///        The shell waits for jobs that are executed in the foreground (FG), while jobs that run
@@ -262,7 +262,84 @@ void eval(char *cmdline)
   if (argv == NULL) return;    // no input
 
   // TODO
-  dump_cmdstruct(argv, outfile, mode);
+  //dump_cmdstruct(argv, outfile, mode);
+  sigset_t sgset;
+  sigemptyset(&sgset);
+  sigaddset(&sgset, SIGCHLD);
+  int cmd_idx = 0;
+  int num_cmd = 0;
+  int old_fd = STDIN_FILENO;
+  while(argv[num_cmd] != NULL)
+    num_cmd++;
+  for(cmd_idx = 0; cmd_idx < num_cmd; cmd_idx++) {
+    if(cmd_idx == num_cmd - 1
+        && outfile == NULL
+        && builtin_cmd(argv[cmd_idx]) == 1
+      ) { // no need to fork
+    } else { // need to fork
+      int pipe_fd[2];
+      if(pipe(pipe_fd) == -1)
+        unix_error("ERROR: Unable to open pipe");
+      sigprocmask(SIG_BLOCK, &sgset, NULL); // block CHLD before fork
+      pid_t fork_pid;
+      fork_pid = fork();
+      if(cmd_idx == num_cmd - 1)
+        addjob(jobs, fork_pid, mode, cmdline);
+      sigprocmask(SIG_UNBLOCK, &sgset, NULL); // unblock CHLD after add job
+      if(fork_pid > 0) { // parent
+        close(pipe_fd[WRITE]);
+        old_fd = pipe_fd[READ];
+
+        // handling job state with builtin command (fg, bg)
+        if(!strcmp("fg", argv[cmd_idx][0]) || !strcmp("bg", argv[cmd_idx][0])) {
+          Job *job;
+          // set job
+          if(argv[cmd_idx][1][0] == '%') { // argument is jid
+            pid_t job_jid = atoi(&argv[cmd_idx][1][1]);
+            job = getjobjid(jobs, job_jid);
+          } else { // argument is pid
+            pid_t job_pid = atoi(argv[cmd_idx][1]);
+            job = getjobpid(jobs, job_pid);
+          }
+          if(job != NULL)
+            job->state = BG;
+        }
+
+        if(mode == FG && (cmd_idx == (num_cmd - 1))) {
+          waitfg(fork_pid);
+        }
+        else if(mode == BG) {
+          printf("[%d] (%d) %s", getjobpid(jobs, fork_pid)->jid, emit_prompt ? fork_pid : -1, cmdline);
+          fflush(stdout);
+        }
+      } else if(fork_pid == 0) { // child
+        setpgid(0, 0);
+        close(pipe_fd[READ]);
+        // handling pipe
+        if(0 < cmd_idx) {
+          if(dup2(old_fd, STDIN_FILENO) == -1)
+            unix_error("ERROR: Unable to dup2");
+        }
+        if(cmd_idx < num_cmd - 1) {
+          if(dup2(pipe_fd[WRITE], STDOUT_FILENO) == -1)
+            unix_error("ERROR: Unable to dup2");
+        } else if (cmd_idx == (num_cmd - 1) && outfile != NULL) {
+          int outfile_fd = open(outfile, O_WRONLY|O_CREAT, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+          if(dup2(outfile_fd, STDOUT_FILENO) == -1)
+            unix_error("ERROR: Unable to dup2");
+        }
+        // execute
+        if(builtin_cmd(argv[cmd_idx]) == 1) {
+          exit(EXIT_SUCCESS);
+        }
+        else if(execvp(argv[cmd_idx][0], argv[cmd_idx]) == -1)
+          app_error("No such file or directory");
+      }
+      else {
+        unix_error("ERROR: Unable to fork");
+      }
+    }
+  }
 }
 
 
@@ -272,9 +349,19 @@ void eval(char *cmdline)
 /// @retval 0 otherwise
 int builtin_cmd(char *argv[])
 {
-  // TODO
-
-  return 0;
+  // TOD
+  if(!strcmp("quit", argv[0])) {
+    exit(EXIT_SUCCESS);
+  } else if(!strcmp("fg", argv[0])) {
+    do_bgfg(argv);
+  } else if(!strcmp("bg", argv[0])) {
+    do_bgfg(argv);
+  } else if(!strcmp("jobs", argv[0])) {
+    listjobs(jobs);
+  } else {
+    return 0;
+  }
+  return 1;
 }
 
 /// @brief Execute the builtin bg and fg commands
@@ -282,6 +369,49 @@ int builtin_cmd(char *argv[])
 void do_bgfg(char *argv[])
 {
   // TODO
+  if(argv[1] == NULL) {
+    if(!strcmp("fg", argv[0])) {
+      printf("fg command requires PID or %%jobid argument\n");
+      return;
+    } else if(!strcmp("bg", argv[0])) { // do nothing
+      printf("bg command requires PID or %%jobid argument\n");
+      return;
+    } else {
+      // UNREACHABLE
+      unix_error("ERROR: Invalid bgfg command");
+    }
+  }
+  // get pid
+  Job *job;
+  pid_t job_pid;
+  if(argv[1][0] == '%') { // argument is jid
+    pid_t job_jid = atoi(&argv[1][1]);
+    if((job = getjobjid(jobs, job_jid)) == NULL) {
+      printf("[%%%d]: No such job\n", job_jid);
+      return;
+    }
+    job_pid = job->pid;
+  } else { // argument is pid
+    job_pid = atoi(argv[1]);
+    if((job = getjobpid(jobs, job_pid)) == NULL) {
+      printf("(%d): No such process\n", job_pid);
+      return;
+    }
+  }
+  // run command
+  if(kill(-1 * job_pid, SIGCONT) == -1) { // send SIGCONT
+    unix_error("ERROR: Fail to SIGCONT");
+  }
+  if(!strcmp("fg", argv[0])) {
+    job->state = FG;
+    waitfg(job_pid);
+  } else if(!strcmp("bg", argv[0])) {
+    job->state = BG;
+    printf("[%d] (%d) %s", job->jid, emit_prompt ? job->pid : -1, job->cmdline);
+  } else {
+    // UNREACHABLE
+    unix_error("ERROR: Command is not fg or bg");
+  }
 }
 
 /// @brief Block until process pid is no longer the foreground process
@@ -289,6 +419,11 @@ void do_bgfg(char *argv[])
 void waitfg(pid_t pid)
 {
   // TODO
+  Job *job = getjobpid(jobs, pid);
+  while((job != NULL) && (job->state == FG)) {
+    sleep(1);
+    job = getjobpid(jobs, pid);
+  }
 }
 
 
@@ -301,7 +436,25 @@ void waitfg(pid_t pid)
 /// @param sig signal (SIGCHLD)
 void sigchld_handler(int sig)
 {
+  //printf("HI IM SIGCHLD\n"); // LOGGING
   // TODO
+  if(sig != SIGCHLD)
+    printf("WARNING: Signal is not SIGCHLD for SIGCHLD handler\n");
+
+  int wstatus;
+  pid_t pid;
+
+  while((pid = waitpid(-1, &wstatus, WNOHANG | WUNTRACED | WCONTINUED)) > 0) { // wait child with nohang
+    Job *job = getjobpid(jobs, pid);
+    if(WIFEXITED(wstatus)) {
+      deletejob(jobs, pid);
+    } else if(WIFSIGNALED(wstatus)) {
+      deletejob(jobs, pid);
+    } else if(WIFSTOPPED(wstatus)) {
+      job->state = ST;
+    } else if(WIFCONTINUED(wstatus)) {
+    }
+  }
 }
 
 /// @brief SIGINT handler. Sent to the shell whenever the user types Ctrl-c at the keyboard.
@@ -309,7 +462,17 @@ void sigchld_handler(int sig)
 /// @param sig signal (SIGINT)
 void sigint_handler(int sig)
 {
+  //printf("HI IM SIGINT\n"); // LOGGING
   // TODO
+  if(sig != SIGINT)
+    printf("WARNING: Signal is not SIGINT for SIGINT handler\n");
+  pid_t fg_pid = fgpid(jobs);
+  if(fg_pid == 0)
+    return;
+  Job *fg_job = getjobpid(jobs, fg_pid);
+  if(kill(-1 * fg_pid, SIGINT) == -1)
+    unix_error("ERROR: Unable to send SIGINT to fg process");
+  fg_job->state = UNDEF;
 }
 
 /// @brief SIGTSTP handler. Sent to the shell whenever the user types Ctrl-z at the keyboard.
@@ -317,7 +480,17 @@ void sigint_handler(int sig)
 /// @param sig signal (SIGTSTP)
 void sigtstp_handler(int sig)
 {
+  //printf("HI IM SIGTSTP\n"); // LOGGING
   // TODO
+  if(sig != SIGTSTP)
+    printf("WARNING: Signal is not SIGTSTP for SIGTSTP handler\n");
+  pid_t fg_pid = fgpid(jobs);
+  if(fg_pid == 0)
+    return;
+  Job *fg_job = getjobpid(jobs, fg_pid);
+  if(kill(-1 * fg_pid, SIGTSTP) == -1)
+    unix_error("ERROR: Unable to send SIGTSTP to fg process");
+  fg_job->state = ST;
 }
 
 
@@ -408,7 +581,7 @@ int parseline_error(const char *cmdline, int pos, int error)
 
 /// @brief parses a command line and splits it into separate argv arrays that can be used directly
 ///        with execv. The first and second level arrays are NULL terminated. The pipe character
-///        ('|') separates commands. The filename following the I/O output redirection character 
+///        ('|') separates commands. The filename following the I/O output redirection character
 ///        ('>') is returned in @a outfile. Returns 0 if the command(s) are to be executed in the
 ///        foreground, 1 for background execution, and -1 on error.
 /// @param cmdline command line to parse
@@ -765,7 +938,7 @@ void sigquit_handler(int sig)
 }
 
 /// @brief strip newlines (\n) from a string. Warning: modifies the string itself!
-///        Inside the string, newlines are replaced with a space, at the end 
+///        Inside the string, newlines are replaced with a space, at the end
 ///        of the string, the newline is deleted.
 ///
 /// @param str string
