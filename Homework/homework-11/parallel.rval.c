@@ -60,7 +60,7 @@ void* crc8(void *argp)
   while (from < to) crc8 ^= data[from++];
 
   // TODO return value to main thread & compute global crc there
-  return NULL; // change this
+  return (void*) crc8; // change this
 }
 
 
@@ -101,14 +101,26 @@ int main(int argc, char *argv[])
   ThreadData *td = malloc(nthread * sizeof(ThreadData)); assert(td != NULL);
 
   // TODO
-
+  for (int i = 0; i < nthread; i++) {
+    td[i].data = filedata;
+    td[i].from = i * (s.st_size / nthread);
+    if (i < nthread - 1)
+      td[i].to = (i + 1) * (s.st_size / nthread);
+    else
+      td[i].to = s.st_size;
+    pthread_create(&td[i].tid, NULL, crc8, &td[i]);
+  }
   //
   // wait for all threads to end and sum up their result
   //
   unsigned char crc = 0;
 
   // TODO
-
+  for (int i = 0; i < nthread; i++) {
+    void *rvalue;
+    pthread_join(td[i].tid, &rvalue);
+    crc ^= (unsigned char) rvalue;
+  }
   //
   // free resources
   //

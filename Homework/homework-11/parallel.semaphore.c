@@ -65,7 +65,11 @@ void* crc8(void *argp)
 
   // update global crc
   // TODO
-
+  if (sem_wait(&mutex) < 0)
+    ABORT();
+  crc ^= crc8;
+  if (sem_post(&mutex) < 0)
+    ABORT();
   return NULL;
 }
 
@@ -107,14 +111,24 @@ int main(int argc, char *argv[])
   ThreadData *td = malloc(nthread * sizeof(ThreadData)); assert(td != NULL);
 
   // TODO
-
-
+  sem_init(&mutex, 0, 1);
+  for (int i = 0; i < nthread; i++) {
+    td[i].data = filedata;
+    td[i].from = i * (s.st_size / nthread);
+    if (i < nthread - 1)
+      td[i].to = (i + 1) * (s.st_size / nthread);
+    else
+      td[i].to = s.st_size;
+    pthread_create(&td[i].tid, NULL, crc8, &td[i]);
+  }
   //
   // wait for all threads to end and sum up their result
   //
 
   // TODO
-
+  for (int i = 0; i < nthread; i++) {
+    pthread_join(td[i].tid, NULL);
+  }
   //
   // free resources
   //
