@@ -95,6 +95,7 @@ struct mcdonalds_ctx {
 
 int listenfd;                                               ///< listen file descriptor
 struct mcdonalds_ctx server_ctx;                            ///< keeps server context
+pthread_mutex_t server_ctx_mutex = PTHREAD_MUTEX_INITIALIZER;///< mutex for server context
 sig_atomic_t keep_running = 1;                              ///< keeps all the threads running
 pthread_t kitchen_thread[NUM_KITCHEN];                      ///< thread for kitchen
 
@@ -116,6 +117,7 @@ Node* issue_order(unsigned int customerID, enum burger_type type)
   pthread_cond_init(&new_node->cond, NULL);
   pthread_mutex_init(&new_node->mutex, NULL);
 
+  pthread_mutex_lock(&server_ctx_mutex);
   if (server_ctx.list.tail == NULL) {
     server_ctx.list.head = new_node;
     server_ctx.list.tail = new_node;
@@ -125,6 +127,7 @@ Node* issue_order(unsigned int customerID, enum burger_type type)
   }
 
   server_ctx.list.count++;
+  pthread_mutex_unlock(&server_ctx_mutex);
 
   return new_node;
 }
@@ -135,7 +138,12 @@ Node* get_order(void)
 {
   Node *target_node;
 
-  if (server_ctx.list.head == NULL) return NULL;
+  pthread_mutex_lock(&server_ctx_mutex);
+
+  if (server_ctx.list.head == NULL) {
+    pthread_mutex_unlock(&server_ctx_mutex);
+    return NULL;
+  }
 
   target_node = server_ctx.list.head;
 
@@ -149,6 +157,7 @@ Node* get_order(void)
 
   server_ctx.list.count--;
 
+  pthread_mutex_unlock(&server_ctx_mutex);
 
   return target_node;
 }
@@ -159,7 +168,9 @@ unsigned int order_left(void)
 {
   int ret;
 
+  pthread_mutex_lock(&server_ctx_mutex);
   ret = server_ctx.list.count;
+  pthread_mutex_unlock(&server_ctx_mutex);
 
   return ret;
 }
@@ -185,7 +196,9 @@ void* kitchen_task(void *dummy)
     sleep(5);
     printf("[Thread %lu] %s burger is ready\n", tid, burger_names[type]);
 
+    pthread_mutex_lock(&server_ctx_mutex);
     server_ctx.total_burgers[type]++;
+    pthread_mutex_unlock(&server_ctx_mutex);
 
     order->is_ready = true;
     pthread_cond_signal(&order->cond);
@@ -207,11 +220,13 @@ void* serve_client(void *newsock)
   Node *order = NULL;
   int ret, i, clientfd;
 
-  clientfd = *(int *) newsock;
+  clientfd = (int) newsock;
   buffer = (char *) malloc(BUF_SIZE);
   msglen = BUF_SIZE;
 
+  pthread_mutex_lock(&server_ctx_mutex);
   customerID = server_ctx.total_customers++;
+  pthread_mutex_unlock(&server_ctx_mutex);
 
   printf("Customer #%d visited\n", customerID);
 
@@ -228,23 +243,48 @@ void* serve_client(void *newsock)
     goto err;
   }
   free(message);
-  goto err; // Remove for milestones 2 & 3!
 
   // receive order from the customer
   // TODO
+  if (get_line(clientfd, &buffer, &msglen) < 0) {
+    printf("Error: cannot get data from client\n");
+    goto err;
+  }
 
   // parse order from the customer
   // TODO
+  type = BURGER_TYPE_MAX;
+  for (burger = strtok(buffer, " \n"); burger != NULL; burger = strtok(NULL, " \n")) {
+    if (strcmp("bigmac", burger) == 0)
+      type = BURGER_BIGMAC;
+    else if (strcmp("cheese", burger) == 0)
+      type = BURGER_CHEESE;
+    else if (strcmp("chicken", burger) == 0)
+      type = BURGER_CHICKEN;
+    else if (strcmp("bulgogi", burger) == 0)
+      type = BURGER_BULGOGI;
+  }
 
   // if burger is not available, exit connection
   // TODO
+  if (type == BURGER_TYPE_MAX) { // if there is no matched burger
+    printf("Error: Unknown burger type\n");
+    goto err;
+  }
 
   // issue order to kitchen and wait
   // TODO
+  order = issue_order(customerID, type);
+
+  pthread_mutex_lock(&order->mutex);
+  if (order->is_ready) // do not wait if already ready
+    pthread_mutex_unlock(&order->mutex);
+  else
+    pthread_cond_wait(&order->cond, &order->mutex);
 
   // if order successfully handled, hand burger and say goodbye
   if (order->is_ready) {
-    ret = asprintf(&message, "Your %s burger is ready! Goodbye!\n", burger_names[i]);
+    ret = asprintf(&message, "Your %s burger is ready! Goodbye!\n", burger_names[type]);
     sent = put_line(clientfd, message, ret);
     if (sent <= 0) {
       printf("Error: cannot send data to client\n");
@@ -256,6 +296,9 @@ void* serve_client(void *newsock)
   free(order);
 
 err:
+  pthread_mutex_lock(&server_ctx_mutex);
+  server_ctx.total_queueing--;
+  pthread_mutex_unlock(&server_ctx_mutex);
   close(clientfd);
   free(buffer);
   return NULL;
@@ -270,11 +313,57 @@ void start_server()
 
   // get socket list
   // TODO
+  ai = getsocklist(NULL, PORT, AF_UNSPEC, SOCK_STREAM, 1, NULL);
+  for(ai_it = ai; ai_it != NULL; ai_it = ai_it->ai_next) {
+    listenfd = socket(ai_it->ai_family, ai_it->ai_socktype, ai_it->ai_protocol);
+    int vtrue = 1;
+    if ((listenfd != -1) && // right listenfd is set
+        (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &vtrue, sizeof(int)) == 0) && // for easy debuging
+        (bind(listenfd, ai_it->ai_addr, ai_it->ai_addrlen) == 0)
+       )
+      break;
+  }
+  if (ai_it == NULL) { // cannot open socket until end of socklist
+    printf("error: Cannot open socket\n");
+    return;
+  }
 
   printf("Listening...\n");
 
   // Keep listening and accepting clients
   // TODO
+  listen(listenfd, CUSTOMER_MAX);
+  struct sockaddr peer_addr;
+  socklen_t peer_addr_size = sizeof(peer_addr);
+  while (true) {
+    peer_addr_size = sizeof(peer_addr);
+    clientfd = accept(listenfd, &peer_addr, &peer_addr_size);
+    if (clientfd < 0) // cannot accept clientfd (ex: listen fd is closed
+      break;
+
+    pthread_mutex_lock(&server_ctx_mutex);
+    if (server_ctx.total_queueing >= CUSTOMER_MAX) {
+      printf("Max number of customers exceeded, Good bye!\n");
+      close(clientfd);
+      pthread_mutex_unlock(&server_ctx_mutex);
+      continue;
+    }
+    server_ctx.total_queueing++;
+    pthread_mutex_unlock(&server_ctx_mutex);
+
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, serve_client, (void*) clientfd) != 0) { // cannot create thread
+      pthread_mutex_lock(&server_ctx_mutex);
+      server_ctx.total_queueing--;
+      pthread_mutex_unlock(&server_ctx_mutex);
+      break;
+    }
+    pthread_detach(tid);
+    // serve_client((void*) clientfd);
+  }
+  // END
+  free(ai);
+  free(ai_it);
 }
 
 /// @brief prints overall statistics
@@ -358,8 +447,10 @@ void init_mcdonalds(void)
     server_ctx.total_burgers[i] = 0;
   }
 
-  pthread_create(&kitchen_thread[0], NULL, kitchen_task, NULL);
-  pthread_detach(kitchen_thread[0]);
+  for (i = 0; i < NUM_KITCHEN; i++) {
+    pthread_create(&kitchen_thread[i], NULL, kitchen_task, NULL);
+    pthread_detach(kitchen_thread[i]);
+  }
 }
 
 /// @brief program entry point

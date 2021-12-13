@@ -69,8 +69,23 @@ void *thread_task(void *data)
   // Connect to McDonald's server
   // Get the socket list
   // TODO
+  struct addrinfo *ai_it = getsocklist(IP, PORT, AF_UNSPEC, SOCK_STREAM, 0, NULL);
   // Create the sockets and connect
   // TODO
+  while (ai_it != NULL) {
+    serverfd = socket(ai_it->ai_family, ai_it->ai_socktype, ai_it->ai_protocol);
+    if (serverfd != -1) {
+      if (connect(serverfd, ai_it->ai_addr, ai_it->ai_addrlen) == 0)
+        break;
+      close(serverfd);
+      serverfd = -1;
+    }
+    ai_it = ai_it->ai_next;
+  }
+  if (ai_it == NULL) {
+    printf("connect: Connection refused\n");
+    goto err;
+  }
 
   // Read welcome message from the server
   read = get_line(serverfd, &buffer, &buflen);
@@ -108,6 +123,7 @@ void *thread_task(void *data)
   printf("[Thread %lu] From server: %s", tid, buffer);
 
 err:
+  freeaddrinfo(ai_it);
   close(serverfd);
   pthread_exit(NULL);
 }
@@ -125,9 +141,16 @@ int main(int argc, char const *argv[])
 
   // Create the threads equal to the num of threads passed in the argument
   // TODO
+  num_threads = atoi(argv[1]);
+  pthread_t *tid_list = malloc(sizeof(pthread_t) * num_threads);
+  for (i = 0; i < num_threads; i++) {
+    pthread_create(&tid_list[i], NULL, thread_task, NULL);
+  }
 
   // Join all the threads before leaving
   // TODO
-
+  for (i = 0; i < num_threads; i++) {
+    pthread_join(tid_list[i], NULL);
+  }
   return 0;
 }
