@@ -1,7 +1,7 @@
 <div align="center">
   <h1>
     <code>
-      SNU System Programming 2021-2
+      SNU System Programming - Fall 2021
     </code>
   </h1>
 </div>
